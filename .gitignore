@@ -1,0 +1,20 @@
+# Python / venv
+rl-env/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Logs / artifacts
+*.log
+
+# (必要に応じて) 大きな学習成果物
+models/
+checkpoints/
