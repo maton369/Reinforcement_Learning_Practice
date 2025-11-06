@@ -15,7 +15,7 @@
 #
 # 使い方（例）：
 #   Q = np.zeros((16, 4))                # 4x4 FrozenLake の Q テーブル
-#   show_q_value(Q, env_id="FrozenLake-v0")
+#   show_q_value(Q, env_id="FrozenLake-v1")
 #
 # 備考：
 #   ・描画レンジ（vmin/vmax）は与えられた Q の絶対最大値に合わせて対称にスケーリング。
@@ -52,7 +52,7 @@ def _ensure_numpy_row(Qs: Union[Sequence[float], np.ndarray]) -> np.ndarray:
 
 def show_q_value(
     Q: Union[np.ndarray, Dict[int, Sequence[float]]],
-    env_id: str = "FrozenLake-v0",
+    env_id: str = "FrozenLake-v1",
     cmap=cm.RdYlGn,
     interpolation: str = "bilinear",
 ) -> None:
@@ -61,7 +61,7 @@ def show_q_value(
 
     引数:
         Q      : 形状 (num_states, 4) の ndarray あるいは {state: [L, D, R, U]} の辞書
-        env_id : "FrozenLake-v0" / "FrozenLakeEasy-v0" など
+        env_id : "FrozenLake-v1" / "FrozenLakeEasy-v0" など
         cmap   : matplotlib のカラーマップ
         interpolation : imshow の補間方法
 
@@ -69,7 +69,16 @@ def show_q_value(
         Matplotlib 図（plt.show() で表示）
     """
     # --- 環境のメタ情報を取得（行列サイズなど） ---
-    env = gym.make(env_id)
+    try:
+        env = gym.make(env_id)
+    except gym.error.DeprecatedEnv:
+        # Gym >=0.26 では FrozenLake-v0 が削除されたため、-v1 にフォールバック
+        if env_id.endswith("-v0"):
+            fallback_id = env_id[:-3] + "-v1"
+            env = gym.make(fallback_id)
+            env_id = fallback_id
+        else:
+            raise
     nrow = int(env.unwrapped.nrow)  # 例：4
     ncol = int(env.unwrapped.ncol)  # 例：4
     state_size = 3  # 1セルを 3x3 で描画
