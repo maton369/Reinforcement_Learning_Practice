@@ -10,14 +10,12 @@
 # ===============================================
 
 import os
-import io
 import re
 from collections import namedtuple
 from collections import deque
 import numpy as np
 import tensorflow as tf
 from tensorflow.python import keras as K
-from PIL import Image
 import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------
@@ -25,6 +23,28 @@ import matplotlib.pyplot as plt
 # s: 現在状態, a: 行動, r: 報酬, n_s: 次状態, d: 終了フラグ
 # ---------------------------------------------------------------
 Experience = namedtuple("Experience", ["s", "a", "r", "n_s", "d"])
+
+
+def _reset_env(env):
+    """Gym 0.21+ は (obs, info) を返すため、互換性確保で観測のみ返す。"""
+    result = env.reset()
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
+def _step_env(env, action):
+    """
+    Gym 0.21+ では step() が (obs, reward, terminated, truncated, info) を返す。
+    旧API（obs, reward, done, info）と互換な4値に正規化する。
+    """
+    outcome = env.step(action)
+    if len(outcome) == 5:
+        obs, reward, terminated, truncated, info = outcome
+        done = bool(terminated or truncated)
+    else:
+        obs, reward, done, info = outcome
+    return obs, reward, done, info
 
 
 # ===============================================================
@@ -84,14 +104,14 @@ class FNAgent:
     def play(self, env, episode_count=5, render=True):
         """現在の方策で環境を実行して報酬を観察"""
         for e in range(episode_count):
-            s = env.reset()
+            s = _reset_env(env)
             done = False
             episode_reward = 0
             while not done:
                 if render:
                     env.render()
                 a = self.policy(s)
-                n_state, reward, done, info = env.step(a)
+                n_state, reward, done, info = _step_env(env, a)
                 episode_reward += reward
                 s = n_state
             else:
@@ -146,7 +166,7 @@ class Trainer:
         frames = []
 
         for i in range(episode):
-            s = env.reset()
+            s = _reset_env(env)
             done = False
             step_count = 0
             self.episode_begin(i, agent)
@@ -167,7 +187,7 @@ class Trainer:
 
                 # 行動選択と環境ステップ
                 a = agent.policy(s)
-                n_state, reward, done, info = env.step(a)
+                n_state, reward, done, info = _step_env(env, a)
                 e = Experience(s, a, reward, n_state, done)
                 self.experiences.append(e)
 
@@ -237,7 +257,7 @@ class Observer:
 
     def reset(self):
         """環境リセット後の状態を変換して返す"""
-        return self.transform(self._env.reset())
+        return self.transform(_reset_env(self._env))
 
     def render(self):
         """描画"""
@@ -245,7 +265,7 @@ class Observer:
 
     def step(self, action):
         """1ステップ実行し、次状態・報酬・終了フラグを返す"""
-        n_state, reward, done, info = self._env.step(action)
+        n_state, reward, done, info = _step_env(self._env, action)
         return self.transform(n_state), reward, done, info
 
     def transform(self, state):
@@ -262,25 +282,23 @@ class Logger:
         self.log_dir = log_dir
         if not log_dir:
             self.log_dir = os.path.join(os.path.dirname(__file__), "logs")
-        if not os.path.exists(self.log_dir):
-            os.mkdir(self.log_dir)
+        os.makedirs(self.log_dir, exist_ok=True)
 
         if dir_name:
             self.log_dir = os.path.join(self.log_dir, dir_name)
-            if not os.path.exists(self.log_dir):
-                os.mkdir(self.log_dir)
+            os.makedirs(self.log_dir, exist_ok=True)
 
-        # TensorBoardコールバック初期化
-        self._callback = tf.compat.v1.keras.callbacks.TensorBoard(self.log_dir)
+        # Eager 対応の summary writer
+        self._writer = tf.summary.create_file_writer(self.log_dir)
 
     @property
     def writer(self):
         """TensorBoardのwriterオブジェクトを返す"""
-        return self._callback.writer
+        return self._writer
 
     def set_model(self, model):
-        """モデルをコールバックにセット"""
-        self._callback.set_model(model)
+        """互換用メソッド（No-op）"""
+        return None
 
     def path_of(self, file_name):
         """ログディレクトリ内のファイルパスを生成"""
@@ -322,43 +340,25 @@ class Logger:
 
     def write(self, index, name, value):
         """スカラー値をTensorBoardに記録"""
-        summary = tf.compat.v1.Summary()
-        summary_value = summary.value.add()
-        summary_value.tag = name
-        summary_value.simple_value = value
-        self.writer.add_summary(summary, index)
-        self.writer.flush()
+        with self.writer.as_default():
+            tf.summary.scalar(name, value, step=index)
+            self.writer.flush()
 
     def write_image(self, index, frames):
         """フレーム画像をTensorBoardに記録（グレースケール対応）"""
+        if not frames:
+            return
         last_frames = [f[:, :, -1] for f in frames]
-        if np.min(last_frames[-1]) < 0:
-            scale = 127 / np.abs(last_frames[-1]).max()
-            offset = 128
-        else:
-            scale = 255 / np.max(last_frames[-1])
-            offset = 0
-        channel = 1  # グレースケールチャンネル数
-        tag = "frames_at_training_{}".format(index)
-        values = []
+        array = np.stack(last_frames, axis=0).astype(np.float32)
+        # 0-1 正規化（定数配列のときはゼロにする）
+        min_val = np.min(array)
+        max_val = np.max(array)
+        denom = max(max_val - min_val, 1e-6)
+        array = (array - min_val) / denom
+        array = array[..., np.newaxis]  # (N, H, W, 1)
 
-        for f in last_frames:
-            height, width = f.shape
-            array = np.asarray(f * scale + offset, dtype=np.uint8)
-            image = Image.fromarray(array)
-            output = io.BytesIO()
-            image.save(output, format="PNG")
-            image_string = output.getvalue()
-            output.close()
-            image = tf.compat.v1.Summary.Image(
-                height=height,
-                width=width,
-                colorspace=channel,
-                encoded_image_string=image_string,
+        with self.writer.as_default():
+            tf.summary.image(
+                f"frames_at_training_{index}", array, step=index, max_outputs=array.shape[0]
             )
-            value = tf.compat.v1.Summary.Value(tag=tag, image=image)
-            values.append(value)
-
-        summary = tf.compat.v1.Summary(value=values)
-        self.writer.add_summary(summary, index)
-        self.writer.flush()
+            self.writer.flush()
